@@ -7,6 +7,7 @@ Env vars required:
 """
 import os
 import json
+import html as html_mod
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ import re as _re
 PROPERTY_ID = "533271514"
 SCOPES = ["https://www.googleapis.com/auth/analytics.readonly"]
 IST_OFFSET = 1
-DAYS = 30
+PERIODS = {"3d": 3, "7d": 7, "30d": 30, "90d": 90}
 
 LABELS = {
     "golf_nav_view": "Page Navigation",
@@ -185,13 +186,30 @@ def fmt_time(s):
     return f"{int(s) // 60}m {int(s) % 60:02d}s"
 
 
-def delta(cur, prev):
+def delta_html(cur, prev):
     if prev == 0:
         return ""
     pct = round((cur - prev) / prev * 100)
     color = "#15803D" if pct >= 0 else "#B91C1C"
     arrow = "+" if pct >= 0 else ""
     return f'<span style="color:{color};font-size:0.75rem;">{arrow}{pct}%</span>'
+
+
+def _build_round_pie(df_clean):
+    by_round = df_clean.groupby("round")["eventCount"].sum().reset_index()
+    by_round["label"] = by_round["round"].apply(lambda x: f"R{x}")
+    by_round = by_round.sort_values("label")
+    fig = go.Figure(go.Pie(
+        labels=by_round["label"].tolist(),
+        values=by_round["eventCount"].tolist(),
+        hole=0.5,
+        marker=dict(colors=[ROUND_COLORS.get(l, T["accent"]) for l in by_round["label"]],
+                    line=dict(color="#fff", width=2)),
+        textinfo="label+percent", textfont=dict(size=11),
+    ))
+    fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
+                      paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
+    return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
 def chart_layout(height=280):
@@ -204,11 +222,11 @@ def chart_layout(height=280):
     )
 
 
-def main():
-    print("Fetching GA4 data...")
-    start = f"{DAYS}daysAgo"
-    prev_start = f"{DAYS * 2}daysAgo"
-    prev_end = f"{DAYS}daysAgo"
+def build_period_html(days, period_key):
+    """Build all section HTML for a given period. Returns a dict of HTML fragments."""
+    start = f"{days}daysAgo"
+    prev_start = f"{days * 2}daysAgo"
+    prev_end = f"{days}daysAgo"
 
     overview = fetch(["date"], ["activeUsers", "sessions", "eventCount", "averageSessionDuration"], start)
     overview_prev = fetch(["date"], ["activeUsers", "sessions", "eventCount", "averageSessionDuration"], prev_start, prev_end)
@@ -222,7 +240,7 @@ def main():
     def esum(alias):
         return sum(ec.get(e, 0) for e in EVENT_ALIASES.get(alias, [alias]))
 
-    # ── Overview metrics ──
+    # ── 1. Overview ──
     users_total = int(overview["activeUsers"].sum())
     users_prev = int(overview_prev["activeUsers"].sum())
     sessions_total = int(overview["sessions"].sum())
@@ -232,8 +250,31 @@ def main():
     load_tournament = ec.get("golf_action_click_load_tournament", 0)
     load_prev = ecp.get("golf_action_click_load_tournament", 0)
 
-    # ── Pages viewed ──
-    print("Fetching page data...")
+    overview_html = f"""
+    <div class="grid grid-4">
+      <div class="metric">
+        <div class="metric-label">Unique users</div>
+        <div class="metric-value">{users_total:,}</div>
+        <div class="metric-delta">{delta_html(users_total, users_prev)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Sessions</div>
+        <div class="metric-value">{sessions_total:,}</div>
+        <div class="metric-delta">{delta_html(sessions_total, sessions_prev)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Load tournament</div>
+        <div class="metric-value">{load_tournament:,}</div>
+        <div class="metric-delta">{delta_html(load_tournament, load_prev)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Avg session</div>
+        <div class="metric-value">{fmt_time(avg_dur)}</div>
+        <div class="metric-delta">{delta_html(avg_dur, dur_prev)}</div>
+      </div>
+    </div>"""
+
+    # ── 2. Pages viewed ──
     nav_by_page = try_fetch(["eventName", "pageLocation"], ["eventCount"], start, filter_event="golf_nav_view")
     page_pie_html = ""
     if not nav_by_page.empty:
@@ -242,39 +283,18 @@ def main():
         total_nav = page_totals.sum()
         if total_nav > 0:
             fig = go.Figure(go.Pie(
-                labels=page_totals.index.tolist(),
-                values=page_totals.values.tolist(),
-                hole=0.5,
+                labels=page_totals.index.tolist(), values=page_totals.values.tolist(), hole=0.5,
                 marker=dict(colors=[PAGE_COLORS.get(p, "#6B7280") for p in page_totals.index],
                             line=dict(color="#fff", width=2)),
-                textinfo="label+percent",
-                textfont=dict(size=11),
+                textinfo="label+percent", textfont=dict(size=11),
             ))
             fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
                               paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
             page_pie_html = fig.to_html(full_html=False, include_plotlyjs=False)
 
-    # ── Round tabs ──
     url_data = try_fetch(["pageLocation"], ["eventCount"], start, filter_event="golf_select_round_tab")
     round_pie_html = ""
     cm_round_pie_html = ""
-
-    def _build_round_pie(df_clean):
-        by_round = df_clean.groupby("round")["eventCount"].sum().reset_index()
-        by_round["label"] = by_round["round"].apply(lambda x: f"R{x}")
-        by_round = by_round.sort_values("label")
-        fig = go.Figure(go.Pie(
-            labels=by_round["label"].tolist(),
-            values=by_round["eventCount"].tolist(),
-            hole=0.5,
-            marker=dict(colors=[ROUND_COLORS.get(l, T["accent"]) for l in by_round["label"]],
-                        line=dict(color="#fff", width=2)),
-            textinfo="label+percent", textfont=dict(size=11),
-        ))
-        fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
-                          paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
-        return fig.to_html(full_html=False, include_plotlyjs=False)
-
     if not url_data.empty:
         url_data["round"] = url_data["pageLocation"].apply(
             lambda u: _re.search(r'roundNumber=(\d)', str(u)).group(1) if _re.search(r'roundNumber=(\d)', str(u)) else None
@@ -286,7 +306,6 @@ def main():
             if not rounds_only.empty:
                 round_pie_html = _build_round_pie(rounds_only)
 
-    # ── Course mgmt round tabs ──
     cm_nav = try_fetch(["pageLocation"], ["eventCount"], start, filter_event="golf_nav_view")
     if not cm_nav.empty:
         cm_nav["page"] = cm_nav["pageLocation"].apply(extract_page)
@@ -298,18 +317,31 @@ def main():
         if not cm_clean.empty:
             cm_round_pie_html = _build_round_pie(cm_clean)
 
-    # ── Nudges ──
+    pages_html = f"""
+    <div class="grid grid-3">
+      <div>
+        <h2 style="font-size:0.9rem;">Page distribution</h2>
+        {page_pie_html if page_pie_html else '<p class="caption">No page data</p>'}
+      </div>
+      <div>
+        <h2 style="font-size:0.9rem;">Rounds — clicks p/ round</h2>
+        {round_pie_html if round_pie_html else '<p class="caption">No round tab data</p>'}
+      </div>
+      <div>
+        <h2 style="font-size:0.9rem;">Course mgmt — clicks p/ round</h2>
+        {cm_round_pie_html if cm_round_pie_html else '<p class="caption">No round tab data</p>'}
+      </div>
+    </div>"""
+
+    # ── 3. Trader Actions ──
     player_nudge = ec.get("golf_adjust_player_nudge", 0)
     hole_nudge = ec.get("golf_adjust_hole_nudge", 0)
     modal_nudge = ec.get("golf_modal_adjust_nudge", 0)
     modal_prev = ecp.get("golf_modal_adjust_nudge", 0)
     sidebar_open = ec.get("golf_open_hole_configure", 0)
     sidebar_open_prev = ecp.get("golf_open_hole_configure", 0)
-
-    # ── Kill switch ──
     ks_total = esum("kill_switch")
 
-    # ── Course management nudges ──
     rough = ec.get("golf_course_adjust_rough", 0)
     morning = ec.get("golf_course_adjust_morning_wave", 0)
     afternoon = ec.get("golf_course_adjust_afternoon_wave", 0)
@@ -318,8 +350,6 @@ def main():
     late_hd = ec.get("golf_course_adjust_hole_late_hd", 0)
     late_par = ec.get("golf_course_adjust_hole_late_par", 0)
 
-    # ── Additional tracking bar chart ──
-    print("Building charts...")
     new_items = [(lbl, ec.get(ev, 0)) for ev, lbl in NEW_TRACKING_EVENTS if ec.get(ev, 0) > 0]
     tracking_bar_html = ""
     if new_items:
@@ -328,8 +358,7 @@ def main():
             x=ndf["Count"], y=ndf["Event"], orientation="h",
             marker_color=T["accent"],
             text=[f"{v:,}" for v in ndf["Count"]],
-            textposition="auto",
-            textfont=dict(color="#FFFFFF", size=11),
+            textposition="auto", textfont=dict(color="#FFFFFF", size=11),
         ))
         fig.update_layout(
             **chart_layout(height=max(200, len(ndf) * 36)),
@@ -339,18 +368,66 @@ def main():
         )
         tracking_bar_html = fig.to_html(full_html=False, include_plotlyjs=False)
 
-    # ── Demographics ──
+    trader_html = f"""
+    <h2 style="font-size:0.9rem;">Nudge — Rounds</h2>
+    <p class="caption" style="margin-top:-0.5rem;margin-bottom:0.75rem;">Nudge adjustments on the Rounds page and sidebar panel</p>
+    <div class="grid grid-4">
+      <div class="metric"><div class="metric-label">Player Nudge</div><div class="metric-value">{player_nudge:,}</div></div>
+      <div class="metric"><div class="metric-label">Hole Nudge</div><div class="metric-value">{hole_nudge:,}</div></div>
+      <div class="metric"><div class="metric-label">Nudge sidebar Open</div><div class="metric-value">{sidebar_open:,}</div><div class="metric-delta">{delta_html(sidebar_open, sidebar_open_prev)}</div></div>
+      <div class="metric"><div class="metric-label">Sidebar nudge clicks</div><div class="metric-value">{modal_nudge:,}</div><div class="metric-delta">{delta_html(modal_nudge, modal_prev)}</div></div>
+    </div>
+    <div class="grid grid-2" style="margin-top:1rem;">
+      <div class="sub-card">
+        <h2 style="font-size:0.9rem;">Kill switch</h2>
+        <div class="metric" style="border:none;padding:0.5rem 0;"><div class="metric-label">Total toggles</div><div class="metric-value">{ks_total:,}</div></div>
+      </div>
+      <div class="sub-card">
+        <h2 style="font-size:0.9rem;">Nudge — Course Mgmt</h2>
+        <div class="grid grid-3" style="margin-top:0.5rem;">
+          <div><div class="metric-label">Rough</div><div class="metric-value" style="font-size:1.1rem;">{rough:,}</div></div>
+          <div><div class="metric-label">Morning</div><div class="metric-value" style="font-size:1.1rem;">{morning:,}</div></div>
+          <div><div class="metric-label">Afternoon</div><div class="metric-value" style="font-size:1.1rem;">{afternoon:,}</div></div>
+        </div>
+        <div class="grid grid-4" style="margin-top:0.5rem;">
+          <div><div class="metric-label">Early HD</div><div style="font-weight:600;">{early_hd:,}</div></div>
+          <div><div class="metric-label">Early Par</div><div style="font-weight:600;">{early_par:,}</div></div>
+          <div><div class="metric-label">Late HD</div><div style="font-weight:600;">{late_hd:,}</div></div>
+          <div><div class="metric-label">Late Par</div><div style="font-weight:600;">{late_par:,}</div></div>
+        </div>
+      </div>
+    </div>
+    <h2 style="font-size:0.9rem;margin-top:1.25rem;">Additional tracking tags</h2>
+    {tracking_bar_html if tracking_bar_html else '<p class="caption">No tracking data</p>'}"""
+
+    # ── 4. Demographics ──
     geo = try_fetch(["country", "city"], ["activeUsers"], start)
     devices = try_fetch(["deviceCategory"], ["activeUsers"], start)
     browsers = try_fetch(["browser"], ["activeUsers"], start)
     hourly = try_fetch(["hour"], ["activeUsers", "sessions"], start)
+
+    # Users
+    all_users_df = try_fetch(["customUser:user_email"], ["activeUsers"], start)
+    users_html = ""
+    if not all_users_df.empty:
+        col = "customUser:user_email"
+        clean_users = all_users_df[~all_users_df[col].isin(["(not set)", ""])]
+        if not clean_users.empty:
+            for _, r in clean_users.sort_values("activeUsers", ascending=False).iterrows():
+                email = r[col]
+                name = email.split("@")[0].replace(".", " ").title()
+                users_html += f'<div class="text-item">{html_mod.escape(name)}</div>'
+        else:
+            users_html = '<p class="caption">No identified users yet</p>'
+    else:
+        users_html = '<p class="caption">No identified users yet</p>'
 
     geo_html = ""
     if not geo.empty:
         for _, r in geo.sort_values("activeUsers", ascending=False).head(8).iterrows():
             city = r["city"] if r["city"] != "(not set)" else ""
             loc = f"{city}, {r['country']}" if city else r["country"]
-            geo_html += f'<div class="text-item">{loc}: {int(r["activeUsers"]):,}</div>'
+            geo_html += f'<div class="text-item">{html_mod.escape(loc)}: {int(r["activeUsers"]):,}</div>'
 
     device_html = ""
     if not devices.empty:
@@ -359,7 +436,7 @@ def main():
     if not browsers.empty:
         device_html += '<div style="border-top:1px solid #E5E7EB;margin:0.5rem 0;"></div>'
         for _, r in browsers.sort_values("activeUsers", ascending=False).head(5).iterrows():
-            device_html += f'<div class="text-item">{r["browser"]}: {int(r["activeUsers"]):,}</div>'
+            device_html += f'<div class="text-item">{html_mod.escape(r["browser"])}: {int(r["activeUsers"]):,}</div>'
 
     hourly_chart_html = ""
     if not hourly.empty:
@@ -378,7 +455,27 @@ def main():
         )
         hourly_chart_html = fig.to_html(full_html=False, include_plotlyjs=False)
 
-    # ── Errors & Performance ──
+    demographics_html = f"""
+    <div class="grid grid-4">
+      <div>
+        <h2 style="font-size:0.9rem;">Users</h2>
+        {users_html}
+      </div>
+      <div>
+        <h2 style="font-size:0.9rem;">Location</h2>
+        {geo_html if geo_html else '<p class="caption">No location data</p>'}
+      </div>
+      <div>
+        <h2 style="font-size:0.9rem;">Device &amp; browser</h2>
+        {device_html if device_html else '<p class="caption">No device data</p>'}
+      </div>
+      <div>
+        <h2 style="font-size:0.9rem;">Activity by hour</h2>
+        {hourly_chart_html if hourly_chart_html else '<p class="caption">No hourly data</p>'}
+      </div>
+    </div>"""
+
+    # ── 5. Errors & Performance ──
     js_err = ec.get("golf_error_fail_js_error", 0)
     js_prev = ecp.get("golf_error_fail_js_error", 0)
     perf = ec.get("golf_perf_load_page_timing", 0)
@@ -390,8 +487,17 @@ def main():
         vals = pd.to_numeric(load_time_custom["customEvent:load_time_ms"], errors="coerce").dropna()
         if not vals.empty:
             avg_load_ms = round(vals.mean())
+    load_label = f"{avg_load_ms:,} ms" if 0 < avg_load_ms < 10000 else (f"{avg_load_ms / 1000:.1f} s" if avg_load_ms >= 10000 else "—")
 
-    # ── Event trends ──
+    errors_html = f"""
+    <div class="grid grid-4">
+      <div class="metric"><div class="metric-label">JS errors</div><div class="metric-value">{js_err:,}</div><div class="metric-delta">{delta_html(js_err, js_prev)}</div></div>
+      <div class="metric"><div class="metric-label">Error rate</div><div class="metric-value">{err_rate}%</div></div>
+      <div class="metric"><div class="metric-label">Page timing events</div><div class="metric-value">{perf:,}</div></div>
+      <div class="metric"><div class="metric-label">Avg load time</div><div class="metric-value">{load_label}</div></div>
+    </div>"""
+
+    # ── 6. Event trends ──
     trends_html = ""
     if not daily.empty:
         de = daily.copy()
@@ -412,16 +518,75 @@ def main():
             **chart_layout(320), showlegend=True,
             legend=dict(orientation="h", y=1.12, x=0, font=dict(size=11), bgcolor="rgba(0,0,0,0)"),
             xaxis=dict(gridcolor=T["chart_grid"], tickformat="%b %d",
-                       dtick="D1" if DAYS <= 30 else "D7",
+                       dtick="D1" if days <= 30 else "D7",
                        tickfont=dict(size=10, color=T["text_secondary"])),
             yaxis=dict(gridcolor=T["chart_grid"], title="Events", title_font=dict(size=10)),
         )
         trends_html = fig.to_html(full_html=False, include_plotlyjs=False)
 
-    # ── Build HTML ──
-    print("Building HTML...")
+    return {
+        "overview": overview_html,
+        "pages": pages_html,
+        "trader": trader_html,
+        "demographics": demographics_html,
+        "errors": errors_html,
+        "trends": trends_html if trends_html else '<p class="caption">No trend data</p>',
+    }
+
+
+def main():
+    all_periods = {}
+    for key, days in PERIODS.items():
+        print(f"Fetching data for {key} ({days} days)...")
+        all_periods[key] = build_period_html(days, key)
+
     now = datetime.utcnow().strftime("%d %b %Y, %H:%M UTC")
-    load_label = f"{avg_load_ms:,} ms" if 0 < avg_load_ms < 10000 else (f"{avg_load_ms / 1000:.1f} s" if avg_load_ms >= 10000 else "—")
+
+    period_sections = ""
+    for key, days in PERIODS.items():
+        d = all_periods[key]
+        display = "block" if key == "30d" else "none"
+        period_sections += f"""
+<div class="period-content" id="period-{key}" style="display:{display};">
+
+  <!-- 1. Overview -->
+  <div class="card">
+    <div class="section-header"><span class="section-num">1</span><h2>Overview</h2><span class="subtitle" style="margin-left:auto;">Last {days} days vs previous {days} days</span></div>
+    {d["overview"]}
+  </div>
+
+  <!-- 2. Pages viewed -->
+  <div class="card">
+    <div class="section-header"><span class="section-num">2</span><h2>Pages viewed</h2></div>
+    {d["pages"]}
+  </div>
+
+  <!-- 3. Trader Actions -->
+  <div class="card">
+    <div class="section-header"><span class="section-num">3</span><h2>Trader actions</h2></div>
+    {d["trader"]}
+  </div>
+
+  <!-- 4. Demographics -->
+  <div class="card">
+    <div class="section-header"><span class="section-num">4</span><h2>Demographics</h2></div>
+    {d["demographics"]}
+  </div>
+
+  <!-- 5. Errors & Performance -->
+  <div class="card">
+    <div class="section-header"><span class="section-num">5</span><h2>Errors &amp; performance</h2></div>
+    {d["errors"]}
+  </div>
+
+  <!-- 6. Event trends -->
+  <div class="card">
+    <div class="section-header"><span class="section-num">6</span><h2>Event trends</h2></div>
+    <p class="caption" style="margin-top:-0.5rem;margin-bottom:0.75rem;">Daily counts (excluding today)</p>
+    {d["trends"]}
+  </div>
+
+</div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -454,6 +619,30 @@ def main():
   .text-item {{ font-size: 0.85rem; padding: 0.2rem 0; color: {T["text_secondary"]}; }}
   .sub-card {{ background: {T["surface"]}; border: 1px solid {T["border"]}; border-radius: 8px; padding: 1rem; }}
   .updated {{ color: {T["text_muted"]}; font-size: 0.75rem; text-align: right; padding: 1rem 0; }}
+
+  .filter-bar {{ display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }}
+  .period-btn {{
+    padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid {T["border"]};
+    background: {T["surface"]}; color: {T["text_secondary"]}; font-size: 0.82rem;
+    font-weight: 500; cursor: pointer; transition: all 0.15s;
+  }}
+  .period-btn:hover {{ border-color: {T["accent"]}; color: {T["accent"]}; }}
+  .period-btn.active {{ background: {T["accent"]}; color: #fff; border-color: {T["accent"]}; }}
+
+  .export-btn {{
+    padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid {T["border"]};
+    background: {T["surface"]}; color: {T["text_secondary"]}; font-size: 0.82rem;
+    font-weight: 500; cursor: pointer; transition: all 0.15s; margin-left: auto;
+  }}
+  .export-btn:hover {{ border-color: {T["accent"]}; color: {T["accent"]}; }}
+
+  @media print {{
+    .filter-bar {{ display: none !important; }}
+    .export-btn {{ display: none !important; }}
+    body {{ padding: 0.5rem; }}
+    .card {{ break-inside: avoid; page-break-inside: avoid; }}
+  }}
+
   @media (max-width: 768px) {{
     .grid-2, .grid-3, .grid-4 {{ grid-template-columns: 1fr; }}
     body {{ padding: 1rem; }}
@@ -466,164 +655,34 @@ def main():
 <!-- Header -->
 <div class="card">
   <h1>Golf UI Analytics</h1>
-  <p class="subtitle">GA4 analytics for the Golf trading UI &middot; Last {DAYS} days vs previous {DAYS} days</p>
+  <p class="subtitle">GA4 analytics for the Golf trading UI</p>
   <p class="disclaimer">&#9888; Some tracking tags were added recently and may not have as much data as older ones.</p>
-</div>
 
-<!-- 1. Overview -->
-<div class="card">
-  <div class="section-header"><span class="section-num">1</span><h2>Overview</h2></div>
-  <div class="grid grid-4">
-    <div class="metric">
-      <div class="metric-label">Unique users</div>
-      <div class="metric-value">{users_total:,}</div>
-      <div class="metric-delta">{delta(users_total, users_prev)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Sessions</div>
-      <div class="metric-value">{sessions_total:,}</div>
-      <div class="metric-delta">{delta(sessions_total, sessions_prev)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Load tournament</div>
-      <div class="metric-value">{load_tournament:,}</div>
-      <div class="metric-delta">{delta(load_tournament, load_prev)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Avg session</div>
-      <div class="metric-value">{fmt_time(avg_dur)}</div>
-      <div class="metric-delta">{delta(avg_dur, dur_prev)}</div>
-    </div>
+  <div class="filter-bar" style="margin-top:1rem;">
+    <button class="period-btn" data-period="3d" onclick="switchPeriod('3d')">3d</button>
+    <button class="period-btn" data-period="7d" onclick="switchPeriod('7d')">7d</button>
+    <button class="period-btn active" data-period="30d" onclick="switchPeriod('30d')">30d</button>
+    <button class="period-btn" data-period="90d" onclick="switchPeriod('90d')">90d</button>
+    <button class="export-btn" onclick="window.print()">Export PDF</button>
   </div>
 </div>
 
-<!-- 2. Pages viewed -->
-<div class="card">
-  <div class="section-header"><span class="section-num">2</span><h2>Pages viewed</h2></div>
-  <div class="grid grid-3">
-    <div>
-      <h2 style="font-size:0.9rem;">Page distribution</h2>
-      {page_pie_html if page_pie_html else '<p class="caption">No page data</p>'}
-    </div>
-    <div>
-      <h2 style="font-size:0.9rem;">Rounds — clicks p/ round</h2>
-      {round_pie_html if round_pie_html else '<p class="caption">No round tab data</p>'}
-    </div>
-    <div>
-      <h2 style="font-size:0.9rem;">Course mgmt — clicks p/ round</h2>
-      {cm_round_pie_html if cm_round_pie_html else '<p class="caption">No round tab data</p>'}
-    </div>
-  </div>
-</div>
-
-<!-- 3. Trader Actions -->
-<div class="card">
-  <div class="section-header"><span class="section-num">3</span><h2>Trader actions</h2></div>
-
-  <h2 style="font-size:0.9rem;">Nudge — Rounds</h2>
-  <p class="caption" style="margin-top:-0.5rem;margin-bottom:0.75rem;">Nudge adjustments on the Rounds page and sidebar panel</p>
-  <div class="grid grid-4">
-    <div class="metric">
-      <div class="metric-label">Player Nudge</div>
-      <div class="metric-value">{player_nudge:,}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Hole Nudge</div>
-      <div class="metric-value">{hole_nudge:,}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Nudge sidebar Open</div>
-      <div class="metric-value">{sidebar_open:,}</div>
-      <div class="metric-delta">{delta(sidebar_open, sidebar_open_prev)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Sidebar nudge clicks</div>
-      <div class="metric-value">{modal_nudge:,}</div>
-      <div class="metric-delta">{delta(modal_nudge, modal_prev)}</div>
-    </div>
-  </div>
-
-  <div class="grid grid-2" style="margin-top:1rem;">
-    <div class="sub-card">
-      <h2 style="font-size:0.9rem;">Kill switch</h2>
-      <div class="metric" style="border:none;padding:0.5rem 0;">
-        <div class="metric-label">Total toggles</div>
-        <div class="metric-value">{ks_total:,}</div>
-      </div>
-    </div>
-    <div class="sub-card">
-      <h2 style="font-size:0.9rem;">Nudge — Course Mgmt</h2>
-      <div class="grid grid-3" style="margin-top:0.5rem;">
-        <div><div class="metric-label">Rough</div><div class="metric-value" style="font-size:1.1rem;">{rough:,}</div></div>
-        <div><div class="metric-label">Morning</div><div class="metric-value" style="font-size:1.1rem;">{morning:,}</div></div>
-        <div><div class="metric-label">Afternoon</div><div class="metric-value" style="font-size:1.1rem;">{afternoon:,}</div></div>
-      </div>
-      <div class="grid grid-4" style="margin-top:0.5rem;">
-        <div><div class="metric-label">Early HD</div><div style="font-weight:600;">{early_hd:,}</div></div>
-        <div><div class="metric-label">Early Par</div><div style="font-weight:600;">{early_par:,}</div></div>
-        <div><div class="metric-label">Late HD</div><div style="font-weight:600;">{late_hd:,}</div></div>
-        <div><div class="metric-label">Late Par</div><div style="font-weight:600;">{late_par:,}</div></div>
-      </div>
-    </div>
-  </div>
-
-  <h2 style="font-size:0.9rem;margin-top:1.25rem;">Additional tracking tags</h2>
-  {tracking_bar_html if tracking_bar_html else '<p class="caption">No tracking data</p>'}
-</div>
-
-<!-- 4. Demographics -->
-<div class="card">
-  <div class="section-header"><span class="section-num">4</span><h2>Demographics</h2></div>
-  <div class="grid grid-3">
-    <div>
-      <h2 style="font-size:0.9rem;">Location</h2>
-      {geo_html if geo_html else '<p class="caption">No location data</p>'}
-    </div>
-    <div>
-      <h2 style="font-size:0.9rem;">Device &amp; browser</h2>
-      {device_html if device_html else '<p class="caption">No device data</p>'}
-    </div>
-    <div>
-      <h2 style="font-size:0.9rem;">Activity by hour</h2>
-      {hourly_chart_html if hourly_chart_html else '<p class="caption">No hourly data</p>'}
-    </div>
-  </div>
-</div>
-
-<!-- 5. Errors & Performance -->
-<div class="card">
-  <div class="section-header"><span class="section-num">5</span><h2>Errors &amp; performance</h2></div>
-  <div class="grid grid-4">
-    <div class="metric">
-      <div class="metric-label">JS errors</div>
-      <div class="metric-value">{js_err:,}</div>
-      <div class="metric-delta">{delta(js_err, js_prev)}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Error rate</div>
-      <div class="metric-value">{err_rate}%</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Page timing events</div>
-      <div class="metric-value">{perf:,}</div>
-    </div>
-    <div class="metric">
-      <div class="metric-label">Avg load time</div>
-      <div class="metric-value">{load_label}</div>
-    </div>
-  </div>
-</div>
-
-<!-- 6. Event trends -->
-<div class="card">
-  <div class="section-header"><span class="section-num">6</span><h2>Event trends</h2></div>
-  <p class="caption" style="margin-top:-0.5rem;margin-bottom:0.75rem;">Sessions, tournament loads, nudges, and kill switches — daily counts (excluding today)</p>
-  {trends_html if trends_html else '<p class="caption">No trend data</p>'}
-</div>
+{period_sections}
 
 <div class="updated">Last updated: {now} &middot; Auto-refreshes every hour via GitHub Actions</div>
 
 </div>
+
+<script>
+function switchPeriod(key) {{
+  document.querySelectorAll('.period-content').forEach(el => el.style.display = 'none');
+  document.getElementById('period-' + key).style.display = 'block';
+  document.querySelectorAll('.period-btn').forEach(btn => btn.classList.remove('active'));
+  document.querySelector('[data-period="' + key + '"]').classList.add('active');
+  // Re-trigger Plotly resize for hidden charts
+  setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
+}}
+</script>
 </body>
 </html>"""
 
