@@ -655,7 +655,7 @@ def main():
 <!-- Header -->
 <div class="card">
   <h1>Golf UI Analytics</h1>
-  <p class="subtitle">GA4 analytics for the Golf trading UI</p>
+  <p class="subtitle">GA4 analytics for the Golf trading UI. Data pulled from GA may take 24–48 hrs to update.</p>
   <p class="disclaimer">&#9888; Some tracking tags were added recently and may not have as much data as older ones.</p>
 
   <div class="filter-bar" style="margin-top:1rem;">
