@@ -257,26 +257,46 @@ def main():
     # ── Round tabs ──
     url_data = try_fetch(["pageLocation"], ["eventCount"], start, filter_event="golf_select_round_tab")
     round_pie_html = ""
+    cm_round_pie_html = ""
+
+    def _build_round_pie(df_clean):
+        by_round = df_clean.groupby("round")["eventCount"].sum().reset_index()
+        by_round["label"] = by_round["round"].apply(lambda x: f"R{x}")
+        by_round = by_round.sort_values("label")
+        fig = go.Figure(go.Pie(
+            labels=by_round["label"].tolist(),
+            values=by_round["eventCount"].tolist(),
+            hole=0.5,
+            marker=dict(colors=[ROUND_COLORS.get(l, T["accent"]) for l in by_round["label"]],
+                        line=dict(color="#fff", width=2)),
+            textinfo="label+percent", textfont=dict(size=11),
+        ))
+        fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
+                          paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
+        return fig.to_html(full_html=False, include_plotlyjs=False)
+
     if not url_data.empty:
         url_data["round"] = url_data["pageLocation"].apply(
             lambda u: _re.search(r'roundNumber=(\d)', str(u)).group(1) if _re.search(r'roundNumber=(\d)', str(u)) else None
         )
+        url_data["page"] = url_data["pageLocation"].apply(extract_page)
         url_clean = url_data[url_data["round"].notna()]
         if not url_clean.empty:
-            by_round = url_clean.groupby("round")["eventCount"].sum().reset_index()
-            by_round["label"] = by_round["round"].apply(lambda x: f"R{x}")
-            by_round = by_round.sort_values("label")
-            fig = go.Figure(go.Pie(
-                labels=by_round["label"].tolist(),
-                values=by_round["eventCount"].tolist(),
-                hole=0.5,
-                marker=dict(colors=[ROUND_COLORS.get(l, T["accent"]) for l in by_round["label"]],
-                            line=dict(color="#fff", width=2)),
-                textinfo="label+percent", textfont=dict(size=11),
-            ))
-            fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
-                              paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
-            round_pie_html = fig.to_html(full_html=False, include_plotlyjs=False)
+            rounds_only = url_clean[url_clean["page"] == "Rounds"]
+            if not rounds_only.empty:
+                round_pie_html = _build_round_pie(rounds_only)
+
+    # ── Course mgmt round tabs ──
+    cm_nav = try_fetch(["pageLocation"], ["eventCount"], start, filter_event="golf_nav_view")
+    if not cm_nav.empty:
+        cm_nav["page"] = cm_nav["pageLocation"].apply(extract_page)
+        cm_nav = cm_nav[cm_nav["page"] == "Course Management"]
+        cm_nav["round"] = cm_nav["pageLocation"].apply(
+            lambda u: _re.search(r'roundNumber=(\d)', str(u)).group(1) if _re.search(r'roundNumber=(\d)', str(u)) else None
+        )
+        cm_clean = cm_nav[cm_nav["round"].notna()]
+        if not cm_clean.empty:
+            cm_round_pie_html = _build_round_pie(cm_clean)
 
     # ── Nudges ──
     player_nudge = ec.get("golf_adjust_player_nudge", 0)
@@ -480,14 +500,18 @@ def main():
 <!-- 2. Pages viewed -->
 <div class="card">
   <div class="section-header"><span class="section-num">2</span><h2>Pages viewed</h2></div>
-  <div class="grid grid-2">
+  <div class="grid grid-3">
     <div>
       <h2 style="font-size:0.9rem;">Page distribution</h2>
       {page_pie_html if page_pie_html else '<p class="caption">No page data</p>'}
     </div>
     <div>
-      <h2 style="font-size:0.9rem;">Rounds — clicks per round</h2>
+      <h2 style="font-size:0.9rem;">Rounds — clicks p/ round</h2>
       {round_pie_html if round_pie_html else '<p class="caption">No round tab data</p>'}
+    </div>
+    <div>
+      <h2 style="font-size:0.9rem;">Course mgmt — clicks p/ round</h2>
+      {cm_round_pie_html if cm_round_pie_html else '<p class="caption">No round tab data</p>'}
     </div>
   </div>
 </div>
