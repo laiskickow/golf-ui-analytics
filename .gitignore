@@ -1,0 +1,7 @@
+token.json
+client_secret.json
+credentials.json
+*.pyc
+__pycache__/
+.DS_Store
+.streamlit/secrets.toml
